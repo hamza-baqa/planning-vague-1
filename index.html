@@ -342,6 +342,11 @@ button.hrow:hover{background:var(--hover)}
 .lastmod{font-size:12.5px;color:var(--muted)}
 .warn{margin:0;padding:10px 12px;border-radius:9px;background:var(--late-soft);color:var(--late);font-size:13.5px;font-weight:600}
 .warn[hidden]{display:none}
+/* Actions critiques à part, dépendances */
+.g.critg,.g.critg .lc{background:var(--late)}
+.btn[aria-pressed=true]{background:var(--late);border-color:var(--late);color:#fff}
+.deps{display:flex;flex-wrap:wrap;gap:6px}
+.deps:empty{display:none}
 #app[hidden]{display:none}
 .panel:not(.open){box-shadow:none}
 </style>
@@ -390,6 +395,7 @@ window.FIREBASE_CONFIG = {
     <div class="search"><input type="search" id="q" placeholder="Rechercher une action, un porteur…" aria-label="Rechercher"><kbd>/</kbd></div>
     <div class="seg" id="crit" role="group" aria-label="Criticité"></div>
     <select id="porteur" aria-label="Porteur"></select>
+    <button class="btn" id="critBtn" aria-pressed="false" title="Regrouper les actions de criticité Haute dans un bloc séparé, en haut du planning">Actions critiques à part</button>
     <span class="sp"></span>
     <label class="zoom" id="zoomWrap">Zoom <input type="range" id="zoom" min="26" max="72" value="40"></label>
     <button class="btn" id="foldAll">Tout replier</button>
@@ -474,15 +480,15 @@ const realToday=(()=>{const n=new Date();return Math.round((new Date(n.getFullYe
 const defT=realToday>=0&&realToday<N?realToday:2;
 
 /* Préférences d'affichage : propres à chaque utilisateur (ce navigateur) */
-const S={view:'gantt',T:defT,crit:'Toutes',q:'',porteur:'',chs:new Set(),status:null,collapsed:new Set()};
+const S={view:'gantt',T:defT,crit:'Toutes',q:'',porteur:'',chs:new Set(),status:null,collapsed:new Set(),critBlock:false};
 const PANEL={mode:null,id:null};
 const PREF_KEY='planning-v1-prefs';
 let prefTimer=null,restoredZoom=false;
-function savePrefs(){clearTimeout(prefTimer);prefTimer=setTimeout(()=>{try{localStorage.setItem(PREF_KEY,JSON.stringify({view:S.view,T:S.T,crit:S.crit,q:S.q,porteur:S.porteur,chs:[...S.chs],status:S.status,collapsed:[...S.collapsed],zoom:+$('zoom').value}))}catch(e){}},250)}
+function savePrefs(){clearTimeout(prefTimer);prefTimer=setTimeout(()=>{try{localStorage.setItem(PREF_KEY,JSON.stringify({view:S.view,T:S.T,crit:S.crit,q:S.q,porteur:S.porteur,chs:[...S.chs],status:S.status,collapsed:[...S.collapsed],critBlock:S.critBlock,zoom:+$('zoom').value}))}catch(e){}},250)}
 function loadPrefs(){
   try{const o=JSON.parse(localStorage.getItem(PREF_KEY)||'null');if(!o)return;
     S.view=o.view==='board'?'board':'gantt';if(Number.isInteger(o.T)&&o.T>=0&&o.T<N)S.T=o.T;
-    S.crit=o.crit||'Toutes';S.q=o.q||'';S.porteur=o.porteur||'';S.chs=new Set(o.chs||[]);S.status=o.status||null;S.collapsed=new Set(o.collapsed||[]);
+    S.crit=o.crit||'Toutes';S.q=o.q||'';S.porteur=o.porteur||'';S.chs=new Set(o.chs||[]);S.status=o.status||null;S.collapsed=new Set(o.collapsed||[]);S.critBlock=!!o.critBlock;
     if(o.zoom>=26&&o.zoom<=72){$('zoom').value=o.zoom;document.documentElement.style.setProperty('--dw',o.zoom+'px');restoredZoom=true}
     $('q').value=S.q}catch(e){}}
 
@@ -494,6 +500,8 @@ function cleanItem(r,i){
   if(r.st==='fait'||r.st==='bloque')o.st=r.st;
   if(o.st==='bloque'){o.m=String(r.m||'');o.bat=Number(r.bat)||Date.now()}
   if(r.by)o.by=String(r.by);if(r.u)o.u=String(r.u);if(r.at)o.at=Number(r.at)||0;
+  const d=r.d&&typeof r.d==='object'?[...new Set(Object.values(r.d).map(String))].filter(x=>x!==r.id&&/^[A-Za-z0-9_.-]{1,40}$/.test(x)):[];
+  if(d.length)o.d=d;
   return o}
 const fromObj=obj=>(Array.isArray(obj)?obj:Object.values(obj||{})).map(cleanItem).filter(Boolean).sort((a,b)=>a.o-b.o);
 const toObj=list=>Object.fromEntries(list.map((r,i)=>[KEYOF(r.id),{...r,o:Number.isFinite(r.o)?r.o:i}]));
@@ -572,6 +580,7 @@ function stamp(r){r.u=BE.uid;r.by=BE.name;r.at=Date.now();return r}
 function mutate(label,fn,id){
   const before=new Map(ITEMS.map(r=>[r.id,JSON.stringify(r)]));
   fn();
+  if(typeof label==='function')label=label();
   const patch={},inverse={};
   for(const[k,js]of before){const a=ITEMS.find(r=>r.id===k);if(!a){patch[k]=null;inverse[k]=JSON.parse(js)}else if(JSON.stringify(a)!==js){patch[k]=strip(stamp(a));inverse[k]=JSON.parse(js)}}
   ITEMS.forEach(a=>{if(!before.has(a.id)){patch[a.id]=strip(stamp(a));inverse[a.id]=null}});
@@ -585,6 +594,22 @@ function undo(){
     if(v===null){if(i>=0)ITEMS.splice(i,1);patch[k]=null}
     else{const r=stamp({...v});if(i>=0)ITEMS[i]=r;else ITEMS.push(r);patch[k]=strip(r)}}
   ITEMS.sort((a,b)=>a.o-b.o);update();refreshPanel();send(patch,'Annulation : '+u.label,u.id);toast('Modification annulée')}
+
+/* Dépendances : quand la fin d'une action bouge de k jours, ses dépendantes (et les leurs) suivent du même décalage.
+   Les actions faites ne bougent pas ; le début reste dans la fenêtre du planning. Renvoie le nombre d'actions décalées. */
+const dependents=id=>ITEMS.filter(x=>x.d&&x.d.includes(id));
+function shiftDeps(id,k,seen=new Set([id])){
+  let n=0;if(!k)return 0;
+  dependents(id).forEach(x=>{
+    if(seen.has(x.id))return;seen.add(x.id);if(x.st==='fait')return;
+    const kk=k>0?Math.min(k,N-1-x.s,MAXD-x.e):Math.max(k,-x.s);if(!kk)return;
+    x.s+=kk;x.e+=kk;n+=1+shiftDeps(x.id,kk,seen)});
+  return n}
+const depNote=n=>n?` (${n} action${n>1?'s':''} dépendante${n>1?'s':''} décalée${n>1?'s':''})`:'';
+/* Vrai si `from` dépend, directement ou non, de `target` */
+function dependsOn(from,target,seen=new Set()){
+  if(seen.has(from))return false;seen.add(from);
+  const r=byId(from);return !!(r&&r.d)&&r.d.some(p=>p===target||dependsOn(p,target,seen))}
 function toast(msg,opt={}){
   const t=$('toast');t.innerHTML=`<span>${esc(msg)}</span>${opt.undo?'<button id="undoBtn">Annuler</button>':''}${opt.open?'<button id="seeBtn">Voir</button>':''}`;
   t.classList.add('on');if(opt.undo)$('undoBtn').onclick=undo;if(opt.open)$('seeBtn').onclick=()=>{t.classList.remove('on');openPanel(opt.open)};
@@ -603,11 +628,15 @@ function baseMatch(r){
   if(S.q){const h=(r.id+' '+r.a+' '+r.p+' '+r.br+' '+r.ch+' '+(r.m||'')).toLowerCase();if(!S.q.split(/\s+/).every(w=>h.includes(w)))return false}
   return true}
 function statusMatch(r){if(!S.status)return true;if(S.status==='semaine')return thisWeek(r);if(S.status==='modif')return isMod(r)||isNew(r);return status(r)===S.status}
+/* Priorité : Haute, puis Moyenne, Basse, non renseignée */
+const rank=r=>({Haute:0,Moyenne:1,Basse:2})[r.c]??3;
+const isCrit=r=>r.c==='Haute';
+const CRITG='Actions critiques';
 function ordered(list){
   const brPos={};ITEMS.forEach((r,i)=>{const k=r.ch+'|'+r.br;if(!(k in brPos))brPos[k]=i});
   const pos=new Map(ITEMS.map((r,i)=>[r.id,i]));
-  return [...list].sort((a,b)=>CHS.indexOf(a.ch)-CHS.indexOf(b.ch)||brPos[a.ch+'|'+a.br]-brPos[b.ch+'|'+b.br]||pos.get(a.id)-pos.get(b.id))}
-const visible=()=>ordered(ITEMS.filter(r=>baseMatch(r)&&statusMatch(r)));
+  return [...list].sort((a,b)=>CHS.indexOf(a.ch)-CHS.indexOf(b.ch)||brPos[a.ch+'|'+a.br]-brPos[b.ch+'|'+b.br]||rank(a)-rank(b)||pos.get(a.id)-pos.get(b.id))}
+const visible=()=>{const v=ordered(ITEMS.filter(r=>baseMatch(r)&&statusMatch(r)));return S.critBlock?[...v.filter(isCrit),...v.filter(r=>!isCrit(r))]:v};
 
 /* =====================================================================
    Contrôles
@@ -615,6 +644,7 @@ const visible=()=>ordered(ITEMS.filter(r=>baseMatch(r)&&statusMatch(r)));
 const critBox=$('crit');
 ['Toutes','Haute','Moyenne','Basse'].forEach(c=>{const b=document.createElement('button');b.textContent=c;b.dataset.c=c;b.onclick=()=>{S.crit=c;update()};critBox.appendChild(b)});
 $('porteur').onchange=e=>{S.porteur=e.target.value;update()};
+$('critBtn').onclick=()=>{S.critBlock=!S.critBlock;update()};
 $('q').addEventListener('input',e=>{S.q=e.target.value.toLowerCase().trim();update()});
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{S.view=b.dataset.view;update()});
 const slider=$('tslider');
@@ -649,6 +679,7 @@ function renderTop(){
   $('kpis').innerHTML=K.map(([k,l,c,n])=>`<button class="kpi" data-k="${k}" style="--c:${c}" aria-pressed="${S.status===k}"><i></i><b>${n}</b><span>${l}</span></button>`).join('');
   $('kpis').querySelectorAll('.kpi').forEach(b=>b.onclick=()=>{S.status=S.status===b.dataset.k?null:b.dataset.k;update()});
   critBox.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.c===S.crit));
+  $('critBtn').setAttribute('aria-pressed',S.critBlock);
   document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view===S.view));
   const P=porteurs();if(S.porteur&&!P.includes(S.porteur))S.porteur='';
   $('porteur').innerHTML='<option value="">Tous les porteurs</option>'+P.map(p=>`<option${p===S.porteur?' selected':''}>${esc(p)}</option>`).join('');
@@ -690,17 +721,20 @@ const blkTag=r=>status(r)==='bloque'?`<span class="blk" title="${esc(r.m)}">Bloq
 function renderGantt(rows,intro){
   renderHeader(rows.length);
   let h='',ch=null,br=null,i=0;
+  /* Avec « Actions critiques à part », les actions Haute forment un bloc en tête ; le sous-titre rappelle leur chantier */
+  const grp=r=>S.critBlock&&isCrit(r)?CRITG:r.ch,sub=r=>S.critBlock&&isCrit(r)?r.ch+' › '+r.br:r.br;
   rows.forEach(r=>{
-    if(r.ch!==ch){
-      ch=r.ch;br=null;
-      const all=rows.filter(x=>x.ch===ch),n=all.length,done=all.filter(x=>status(x)==='fait').length,late=all.filter(x=>status(x)==='retard').length,blk=all.filter(x=>status(x)==='bloque').length;
+    if(grp(r)!==ch){
+      ch=grp(r);br=null;
+      const cg=ch===CRITG&&S.critBlock;
+      const all=rows.filter(x=>grp(x)===ch),n=all.length,done=all.filter(x=>status(x)==='fait').length,late=all.filter(x=>status(x)==='retard').length,blk=all.filter(x=>status(x)==='bloque').length;
       const s=Math.min(...all.map(x=>x.s)),e=Math.min(N-1,Math.max(...all.map(x=>x.e)));
       const open=!S.collapsed.has(ch);
-      h+=`<div class="r g"><div class="lc"><button class="gl" data-fold="${esc(ch)}" aria-expanded="${open}"><span class="chev">▼</span><strong>${esc(ch)}</strong><small>${n} action${n>1?'s':''}${done?`, ${done} faite${done>1?'s':''}`:''}${late?`, ${late} en retard`:''}${blk?`, ${blk} bloquée${blk>1?'s':''}`:''}</small><span class="prog"><i style="width:${done/n*100}%"></i><i class="b" style="width:${blk/n*100}%"></i><i class="l" style="width:${late/n*100}%"></i></span></button></div><div class="tc"><span class="env" style="left:calc(var(--dw)*${s});width:calc(var(--dw)*${e-s+1})"></span><button class="gadd" data-add="${esc(ch)}" title="Ajouter une action dans ${esc(ch)}">+ Ajouter</button></div></div>`}
+      h+=`<div class="r g${cg?' critg':''}"><div class="lc"><button class="gl" data-fold="${esc(ch)}" aria-expanded="${open}"><span class="chev">▼</span><strong>${esc(ch)}</strong><small>${n} action${n>1?'s':''}${done?`, ${done} faite${done>1?'s':''}`:''}${late?`, ${late} en retard`:''}${blk?`, ${blk} bloquée${blk>1?'s':''}`:''}</small><span class="prog"><i style="width:${done/n*100}%"></i><i class="b" style="width:${blk/n*100}%"></i><i class="l" style="width:${late/n*100}%"></i></span></button></div><div class="tc"><span class="env" style="left:calc(var(--dw)*${s});width:calc(var(--dw)*${e-s+1})"></span>${cg?'':`<button class="gadd" data-add="${esc(ch)}" title="Ajouter une action dans ${esc(ch)}">+ Ajouter</button>`}</div></div>`}
     if(S.collapsed.has(ch))return;
-    if(r.br!==br){br=r.br;h+=`<div class="r sb"><div class="lc">${esc(br)}</div><div class="tc"></div></div>`}
+    if(sub(r)!==br){br=sub(r);h+=`<div class="r sb"><div class="lc">${esc(br)}</div><div class="tc"></div></div>`}
     const st=status(r);
-    h+=`<div class="r a st-${st}${PANEL.id===r.id&&PANEL.mode?' sel':''}${FLASH.has(r.id)?' flash':''}"><div class="lc"><button class="al" data-open="${r.id}"><span class="id">${esc(r.id)}</span><span class="tx">${esc(r.a)}</span><span class="meta">${st==='fait'?'<span class="tick">✓ Fait</span>':''}${blkTag(r)}${tag(r)}${r.p?`<span>${esc(r.p)}</span>`:''}${r.c?`<span class="crit ${r.c}">${r.c}</span>`:''}</span></button></div><div class="tc">${mark(r,i++)}</div></div>`});
+    h+=`<div class="r a st-${st}${PANEL.id===r.id&&PANEL.mode?' sel':''}${FLASH.has(r.id)?' flash':''}"><div class="lc"><button class="al" data-open="${r.id}"><span class="id">${esc(r.id)}</span><span class="tx">${esc(r.a)}</span><span class="meta">${st==='fait'?'<span class="tick">✓ Fait</span>':''}${blkTag(r)}${tag(r)}${r.p?`<span>${esc(r.p)}</span>`:''}${r.c?`<span class="crit ${r.c}">${r.c}</span>`:''}${r.d?`<span title="Dépend de ${esc(r.d.join(', '))}">↳ après ${esc(r.d.join(', '))}</span>`:''}</span></button></div><div class="tc">${mark(r,i++)}</div></div>`});
   if(!rows.length)h=`<div class="empty">Aucune action ne correspond à ces filtres.<br><button class="btn" onclick="document.getElementById('reset').click()">Réinitialiser les filtres</button></div>`;
   const R=$('rows');R.innerHTML=h;
   if(intro){R.classList.add('intro');setTimeout(()=>R.classList.remove('intro'),2400)}
@@ -710,7 +744,7 @@ function renderGantt(rows,intro){
 function renderBoard(rows){
   const W=[[0,6,'Semaine du 5 oct.'],[7,13,'Semaine du 12 oct.'],[14,20,'Semaine du 19 oct.'],[21,27,'Semaine du 26 oct.'],[28,999,'Novembre et après']];
   $('board').innerHTML=W.map(([a,b,l])=>{
-    const list=rows.filter(r=>r.e>=a&&r.e<=b).sort((x,y)=>x.e-y.e||x.id.localeCompare(y.id));
+    const list=rows.filter(r=>r.e>=a&&r.e<=b).sort((x,y)=>rank(x)-rank(y)||x.e-y.e||x.id.localeCompare(y.id));
     const cur=S.T>=a&&S.T<=b;
     return `<section class="col${cur?' cur':''}"><h3>${l}<small>${list.length}</small></h3><div class="list">${list.length?list.map(r=>{const st=status(r);return `<button class="card st-${st}${FLASH.has(r.id)?' flash':''}" data-open="${r.id}"><span class="top"><span>${esc(r.id)} · ${esc(r.ch)}</span><span>${range(r)}</span></span><span class="t">${esc(r.a)}</span><span class="m">${esc(r.p)}${r.c?', criticité '+r.c.toLowerCase():''}</span>${st==='bloque'&&r.m?`<span class="m blkm">${esc(r.m)}</span>`:''}<span class="badge">${ST[st]}${isNew(r)?' · ajoutée':isMod(r)?' · modifiée':''}</span></button>`}).join(''):'<p class="empty" style="padding:16px">Aucune échéance</p>'}</div></section>`}).join('');
 }
@@ -728,6 +762,7 @@ function openPanel(id){
   const st=status(r),dur=bdays(r.s,r.e),gap=r.e-S.T,o=ORIG[id],B=r.st==='bloque';
   const whenTxt=st==='fait'?'Soldée':st==='bloque'?(gap>=0?`Bloquée, échéance dans ${gap} jour${gap>1?'s':''}`:`Bloquée, échéance dépassée de ${-gap} jour${gap<-1?'s':''}`):gap>0?`Échéance dans ${gap} jour${gap>1?'s':''}`:gap===0?'Échéance aujourd’hui':`Échéance dépassée de ${-gap} jour${gap<-1?'s':''}`;
   const sib=ordered(ITEMS.filter(x=>x.br===r.br&&x.ch===r.ch));
+  const preds=(r.d||[]).map(byId).filter(Boolean),succs=ordered(dependents(id)),late=preds.filter(x=>r.s<x.e);
   const span=Math.max(N,r.e+1),pc=d=>d/span*100;
   const was=f=>o&&o[f]!==r[f]?`<small class="was">avant : ${esc(f==='s'||f==='e'?fmt(o[f]):o[f]||'—')}</small>`:'';
   $('panel').innerHTML=`<div class="ph st-${st}"><button class="x" id="px" aria-label="Fermer">×</button><span class="crumb">${esc(r.id)} · ${esc(r.ch)} › ${esc(r.br)}</span><h2>${esc(r.a)}</h2>${o&&o.a!==r.a?`<small class="was">avant : ${esc(o.a)}</small>`:''}<span class="tags"><span class="status">${ST[st]}</span>${tag(r)}</span>${r.by&&r.at?`<span class="lastmod">Dernière modification par <b>${esc(r.by)}</b>, ${esc(when(r.at))}</span>`:''}</div>
@@ -738,6 +773,8 @@ function openPanel(id){
     ${B?`<div class="blkbox"><strong>Bloqué depuis le ${new Date(r.bat).toLocaleDateString('fr-FR',{day:'numeric',month:'long'})}</strong><p>${r.m?esc(r.m):'Aucun motif indiqué.'}</p><div class="pact"><button class="btn" id="blkEdit">Modifier le motif</button><button class="btn blkon" id="unblk">Débloquer</button></div></div>`:''}
     <div class="blkform" id="blkForm" hidden><label for="blkMotif">Motif du blocage <small>(facultatif)</small></label><textarea id="blkMotif" rows="2" placeholder="Ex. en attente de la validation du CFO">${esc(B?r.m:'')}</textarea><div class="pact"><button class="btn blkon" id="blkOk">${B?'Enregistrer le motif':'Confirmer le blocage'}</button><button class="btn" id="blkCancel">Annuler</button></div></div>
     <div class="pact" id="mainAct"><button class="btn primary" id="editBtn">Modifier</button><button class="doneBtn${r.st==='fait'?' on':''}" id="doneBtn">${r.st==='fait'?'Rouvrir l’action':'Marquer comme faite'}</button>${B||r.st==='fait'?'':'<button class="btn blkbtn" id="blkBtn">Signaler un blocage</button>'}</div>
+    ${preds.length?`<div class="sib"><h4>Dépend de (${preds.length})</h4>${late.length?`<p class="warn">Cette action commence avant la fin de ${esc(late.map(x=>x.id).join(', '))}.</p>`:''}${preds.map(x=>`<button class="st-${status(x)}" data-open="${x.id}"><i></i>${esc(x.id)} – ${esc(x.a)}<span>fin ${fmt(x.e)}</span></button>`).join('')}</div>`:''}
+    ${succs.length?`<div class="sib"><h4>Actions qui en dépendent (${succs.length})</h4>${succs.map(x=>`<button class="st-${status(x)}" data-open="${x.id}"><i></i>${esc(x.id)} – ${esc(x.a)}<span>début ${fmt(x.s)}</span></button>`).join('')}</div>`:''}
     <div class="sib"><h4>${esc(r.br)} (${sib.length})</h4>${sib.map(x=>`<button class="st-${status(x)}${x.id===id?' me':''}" data-open="${x.id}"><i></i>${esc(x.a)}<span>${fmt(x.e)}</span></button>`).join('')}</div>
     <div class="danger">${isMod(r)?'<button class="lnk" id="restoreBtn">Restaurer la version d’origine</button>':''}<button class="lnk red" id="delBtn">Supprimer l’action</button></div>
   </div>`;
@@ -752,7 +789,7 @@ function openPanel(id){
   $('blkOk').onclick=()=>{const m=$('blkMotif').value.trim();mutate(B?`Motif de blocage de ${id} mis à jour`:`${id} signalée bloquée${m?' : '+m:''}`,()=>{r.bat=B?r.bat:Date.now();r.st='bloque';r.m=m},id)};
   if($('unblk'))$('unblk').onclick=()=>mutate(`${id} débloquée`,()=>{delete r.st;delete r.m;delete r.bat},id);
   if($('restoreBtn'))$('restoreBtn').onclick=()=>mutate(`${id} restaurée à sa version d’origine`,()=>{FIELDS.forEach(f=>r[f]=ORIG[id][f])},id);
-  $('delBtn').onclick=()=>{if(!confirm(`Supprimer ${id} – ${r.a} ?\nLa suppression sera visible par tous les utilisateurs.`))return;mutate(`${id} supprimée (${r.a})`,()=>{ITEMS=ITEMS.filter(x=>x.id!==id)},id)};
+  $('delBtn').onclick=()=>{if(!confirm(`Supprimer ${id} – ${r.a} ?\nLa suppression sera visible par tous les utilisateurs.`))return;mutate(`${id} supprimée (${r.a})`,()=>{ITEMS=ITEMS.filter(x=>x.id!==id);dependents(id).forEach(x=>{x.d=x.d.filter(p=>p!==id);if(!x.d.length)delete x.d})},id)};
   markSel(id);
 }
 
@@ -777,6 +814,8 @@ function openEdit(id,presetCh){
     <label class="chk"><input type="checkbox" name="ms"${ms?' checked':''}> Jalon (une seule date)</label>
     <div class="two"><label><span id="sLab">${ms?'Date':'Début'}</span><input type="date" name="s" value="${toISO(r.s)}" min="2026-10-05" max="2026-10-30" required></label>
     <label id="eWrap"${ms?' hidden':''}>Fin<input type="date" name="e" value="${toISO(r.e)}" min="2026-10-05" max="2026-12-31"></label></div>
+    <label>Dépend de <small>(si l’une de ces actions est décalée, celle-ci suit automatiquement)</small><select name="dAdd"><option value="">Ajouter une action dont elle dépend…</option>${ordered(ITEMS).filter(x=>x.id!==id).map(x=>`<option value="${esc(x.id)}">${esc(x.id)} – ${esc(x.a.length>70?x.a.slice(0,70)+'…':x.a)}</option>`).join('')}</select></label>
+    <div class="deps" id="depList"></div>
     <p class="err" id="err" role="alert"></p>
     <div class="pact"><button type="submit" class="btn primary">${id?'Enregistrer les modifications':'Ajouter l’action'}</button><button type="button" class="btn" id="cancelEdit">Annuler</button></div>
   </form>`;
@@ -787,6 +826,13 @@ function openEdit(id,presetCh){
   f.st.onchange=()=>{$('mWrap').hidden=f.st.value!=='bloque'};
   f.ms.onchange=()=>{$('eWrap').hidden=f.ms.checked;$('sLab').textContent=f.ms.checked?'Date':'Début'};
   f.ch.onchange=()=>{$('brList').innerHTML=brs(f.ch.value).map(b=>`<option value="${esc(b)}">`).join('')};
+  let deps=[...(r.d||[])].filter(byId);
+  const drawDeps=()=>{$('depList').innerHTML=deps.map(p=>`<button type="button" class="chip" aria-pressed="true" data-rm="${esc(p)}" title="Retirer cette dépendance">${esc(p)} ×</button>`).join('');
+    $('depList').querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{deps=deps.filter(p=>p!==b.dataset.rm);drawDeps()})};
+  drawDeps();
+  f.dAdd.onchange=()=>{const p=f.dAdd.value;f.dAdd.value='';if(!p||deps.includes(p))return;
+    if(id&&dependsOn(p,id)){$('err').textContent=`Impossible : ${p} dépend déjà de cette action.`;return}
+    $('err').textContent='';deps.push(p);drawDeps()};
   f.onsubmit=e=>{
     e.preventDefault();
     const a=f.a.value.trim();if(!a){$('err').textContent='Indiquez un libellé pour l’action.';f.a.focus();return}
@@ -798,12 +844,14 @@ function openEdit(id,presetCh){
     const v={a,ch:f.ch.value,br:f.br.value.trim()||'Divers',p:f.p.value.trim(),c:f.c.value,s,e:en};
     const stv=f.st.value,mv=f.m.value.trim();
     const applySt=x=>{if(stv==='fait'){x.st='fait';delete x.m;delete x.bat}else if(stv==='bloque'){if(x.st!=='bloque')x.bat=Date.now();x.st='bloque';x.m=mv}else{delete x.st;delete x.m;delete x.bat}};
+    const applyDeps=x=>{const d=deps.filter(byId);if(d.length)x.d=d;else delete x.d};
     if(id){
       const cur=byId(id);if(!cur){$('err').textContent='Cette action a été supprimée par un autre utilisateur.';return}
-      mutate(`${id} modifiée`,()=>{Object.assign(cur,v);applySt(cur)},id);openPanel(id);
+      let n=0;
+      mutate(()=>`${id} modifiée${depNote(n)}`,()=>{const k=v.e-cur.e;Object.assign(cur,v);applySt(cur);applyDeps(cur);n=shiftDeps(id,k)},id);openPanel(id);
     }else{
       const nid=nextId(v.ch),o=Math.max(0,...ITEMS.map(x=>x.o||0))+1;
-      mutate(`${nid} ajoutée (${v.a})`,()=>{const x={id:nid,...v,o};applySt(x);ITEMS.push(x);S.collapsed.delete(v.ch)},nid);
+      mutate(`${nid} ajoutée (${v.a})`,()=>{const x={id:nid,...v,o};applySt(x);applyDeps(x);ITEMS.push(x);S.collapsed.delete(v.ch)},nid);
       openPanel(nid);
       const el=document.querySelector(`.al[data-open="${nid}"]`);if(el)el.scrollIntoView({block:'center',behavior:'smooth'});
     }};
@@ -871,7 +919,8 @@ function endDrag(commit){
   if(!d.moved)return;
   suppressClick=true;setTimeout(()=>suppressClick=false,0);
   const r=byId(d.id);
-  if(commit&&r&&(d.ns!==r.s||d.ne!==r.e))mutate(`${d.id} ${d.mode==='move'?'déplacée':'redimensionnée'} : ${range({s:d.ns,e:d.ne})}`,()=>{r.s=d.ns;r.e=d.ne},d.id);
+  let n=0;
+  if(commit&&r&&(d.ns!==r.s||d.ne!==r.e))mutate(()=>`${d.id} ${d.mode==='move'?'déplacée':'redimensionnée'} : ${range({s:d.ns,e:d.ne})}${depNote(n)}`,()=>{const k=d.ne-r.e;r.s=d.ns;r.e=d.ne;n=shiftDeps(d.id,k)},d.id);
   else update();
 }
 $('rows').addEventListener('pointerup',()=>endDrag(true));
@@ -896,16 +945,16 @@ function download(text,type,name){const blob=new Blob([text],{type});const a=doc
 function exportCSV(){
   const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
   const d=x=>dt(x).toLocaleDateString('fr-FR');
-  const lines=[['ID','Chantier','Sous-chantier','Action','Porteur','Criticité','Début','Fin','Statut','Motif de blocage','Modification','Modifiée par','Modifiée le'].map(q).join(';')];
-  ordered(ITEMS).forEach(r=>lines.push([r.id,r.ch,r.br,r.a,r.p,r.c,d(r.s),d(r.e),ST[status(r)],r.st==='bloque'?r.m:'',isNew(r)?'Ajoutée':isMod(r)?'Modifiée':'',r.by||'',r.at?new Date(r.at).toLocaleString('fr-FR'):''].map(q).join(';')));
-  Object.values(ORIG).filter(r=>!byId(r.id)).forEach(r=>lines.push([r.id,r.ch,r.br,r.a,r.p,r.c,d(r.s),d(r.e),'','','Supprimée','',''].map(q).join(';')));
+  const lines=[['ID','Chantier','Sous-chantier','Action','Porteur','Criticité','Début','Fin','Statut','Motif de blocage','Modification','Modifiée par','Modifiée le','Dépend de'].map(q).join(';')];
+  ordered(ITEMS).forEach(r=>lines.push([r.id,r.ch,r.br,r.a,r.p,r.c,d(r.s),d(r.e),ST[status(r)],r.st==='bloque'?r.m:'',isNew(r)?'Ajoutée':isMod(r)?'Modifiée':'',r.by||'',r.at?new Date(r.at).toLocaleString('fr-FR'):'',(r.d||[]).join(', ')].map(q).join(';')));
+  Object.values(ORIG).filter(r=>!byId(r.id)).forEach(r=>lines.push([r.id,r.ch,r.br,r.a,r.p,r.c,d(r.s),d(r.e),'','','Supprimée','','',''].map(q).join(';')));
   download('\ufeff'+lines.join('\r\n'),'text/csv;charset=utf-8','Planning_demarrage_vague_1_'+new Date().toISOString().slice(0,10)+'.csv');
   toast('Export CSV téléchargé');
 }
 /* Compte rendu : brouillon Outlook (.eml) avec les échéances de la semaine (filtres actifs respectés) */
 function exportMail(){
   const d=x=>dt(x).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
-  const rows=ITEMS.filter(r=>baseMatch(r)&&thisWeek(r)).sort((a,b)=>a.e-b.e||a.id.localeCompare(b.id,'fr',{numeric:true}));
+  const rows=ITEMS.filter(r=>baseMatch(r)&&thisWeek(r)).sort((a,b)=>rank(a)-rank(b)||a.e-b.e||a.id.localeCompare(b.id,'fr',{numeric:true}));
   const th='style="border:1px solid #bfbfbf;padding:6px 10px;background:#1f3864;color:#fff;text-align:left"',td='style="border:1px solid #bfbfbf;padding:6px 10px;vertical-align:top"';
   const table=rows.length?`<table style="border-collapse:collapse;font:10pt Calibri,Arial,sans-serif"><tr><th ${th}>Action</th><th ${th}>Responsable</th><th ${th}>Échéance</th></tr>`
     +rows.map(r=>`<tr><td ${td}><b>${esc(r.id)}</b> – ${esc(r.a)}</td><td ${td}>${esc(r.p)}</td><td ${td}>${esc(d(r.e))}</td></tr>`).join('')+'</table>'
