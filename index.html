@@ -395,6 +395,7 @@ window.FIREBASE_CONFIG = {
     <button class="btn" id="foldAll">Tout replier</button>
     <button class="btn primary" id="addBtn">+ Ajouter une action</button>
     <button class="btn" id="exportBtn">Exporter (CSV)</button>
+    <button class="btn" id="mailBtn">Compte rendu (mail)</button>
     <button class="btn" id="reset" disabled>Réinitialiser les filtres</button>
     <button class="btn" id="histBtn">Historique<span class="hc" id="histCount"></span></button>
     <span class="saved" id="saved" role="status" aria-live="polite"></span>
@@ -624,6 +625,7 @@ $('foldAll').onclick=()=>{if(S.collapsed.size)S.collapsed.clear();else CHS.forEa
 $('reset').onclick=()=>{S.crit='Toutes';S.q='';S.porteur='';S.chs.clear();S.status=null;$('q').value='';update()};
 $('addBtn').onclick=()=>openEdit(null);
 $('exportBtn').onclick=exportCSV;
+$('mailBtn').onclick=exportMail;
 $('histBtn').onclick=()=>openHistory();
 $('scrim').onclick=closePanel;
 function setT(t){t=Math.max(0,Math.min(N-1,t));if(t===S.T)return;S.T=t;update()}
@@ -899,6 +901,23 @@ function exportCSV(){
   Object.values(ORIG).filter(r=>!byId(r.id)).forEach(r=>lines.push([r.id,r.ch,r.br,r.a,r.p,r.c,d(r.s),d(r.e),'','','Supprimée','',''].map(q).join(';')));
   download('\ufeff'+lines.join('\r\n'),'text/csv;charset=utf-8','Planning_demarrage_vague_1_'+new Date().toISOString().slice(0,10)+'.csv');
   toast('Export CSV téléchargé');
+}
+/* Compte rendu : brouillon Outlook (.eml) avec les échéances de la semaine (filtres actifs respectés) */
+function exportMail(){
+  const d=x=>dt(x).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
+  const rows=ITEMS.filter(r=>baseMatch(r)&&thisWeek(r)).sort((a,b)=>a.e-b.e||a.id.localeCompare(b.id,'fr',{numeric:true}));
+  const th='style="border:1px solid #bfbfbf;padding:6px 10px;background:#1f3864;color:#fff;text-align:left"',td='style="border:1px solid #bfbfbf;padding:6px 10px;vertical-align:top"';
+  const table=rows.length?`<table style="border-collapse:collapse;font:10pt Calibri,Arial,sans-serif"><tr><th ${th}>Action</th><th ${th}>Responsable</th><th ${th}>Échéance</th></tr>`
+    +rows.map(r=>`<tr><td ${td}><b>${esc(r.id)}</b> – ${esc(r.a)}</td><td ${td}>${esc(r.p)}</td><td ${td}>${esc(d(r.e))}</td></tr>`).join('')+'</table>'
+    :'<p><i>Aucune action ouverte avec une échéance cette semaine.</i></p>';
+  const html=`<html><head><meta charset="utf-8"></head><body style="font:11pt Calibri,Arial,sans-serif">`
+    +`<p>Bonjour à tous,</p><p>Comme convenu, voici le récapitulatif des actions ouvertes de la semaine (échéances du ${esc(d(S.T))} au ${esc(d(friday()))}). Merci de bien vouloir maintenir leur intégration en début de support, avec responsable et échéance.</p>`
+    +table+'<p>Bien cordialement,</p></body></html>';
+  const b64=s=>{const u=new TextEncoder().encode(s);let t='';u.forEach(c=>t+=String.fromCharCode(c));return btoa(t)};
+  const subject=`Compte rendu – actions de la semaine (jusqu’au ${fmt(friday())})`;
+  const eml=['X-Unsent: 1','Subject: '+subject.match(/.{1,15}/gu).map(p=>'=?UTF-8?B?'+b64(p)+'?=').join('\r\n '),'MIME-Version: 1.0','Content-Type: text/html; charset=UTF-8','Content-Transfer-Encoding: base64','',b64(html).replace(/.{76}/g,'$&\r\n')].join('\r\n');
+  download(eml,'message/rfc822','Compte_rendu_vague_1_'+toISO(S.T)+'.eml');
+  toast(`Brouillon téléchargé (${rows.length} action${rows.length>1?'s':''}) : ouvrez-le pour l’afficher dans Outlook`);
 }
 async function readPlanningFile(file){
   try{const o=JSON.parse(await file.text());const raw=Array.isArray(o)?o:o.items;if(!Array.isArray(raw))throw new Error('format');
