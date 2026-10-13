@@ -347,6 +347,10 @@ button.hrow:hover{background:var(--hover)}
 .btn[aria-pressed=true]{background:var(--late);border-color:var(--late);color:#fff}
 .deps{display:flex;flex-wrap:wrap;gap:6px}
 .deps:empty{display:none}
+/* Lecture seule : les commandes de modification sont masquées */
+body.ro #addBtn,body.ro #mailBtn,body.ro #histBtn,body.ro .gadd,body.ro #mainAct,body.ro .blkbox .pact,body.ro .danger,body.ro .filebtn,body.ro #restoreAll{display:none!important}
+body.ro .bar,body.ro .dia{cursor:pointer}
+.rotag{font-size:12.5px;font-weight:600;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 8px}
 #app[hidden]{display:none}
 .panel:not(.open){box-shadow:none}
 </style>
@@ -540,8 +544,11 @@ function FirebaseBackend(){
         if(!user){h.onGate('login');return}
         B.uid=user.uid;B.email=user.email||'';h.onGate('loading');
         let name=null;
-        try{const s=await fd.get(fd.ref(db,'membres/'+user.uid));if(!s.exists())throw new Error('absent');name=s.val()}
-        catch(e){h.onGate('denied',{uid:user.uid,email:user.email});return}
+        /* Membre : lecture et écriture. Lecteur (sous /lecteurs) : lecture seule. */
+        const look=async p=>{try{const s=await fd.get(fd.ref(db,p+'/'+user.uid));return s.exists()?s:null}catch(e){return null}};
+        const sm=await look('membres'),sl=sm?null:await look('lecteurs');
+        if(!sm&&!sl){h.onGate('denied',{uid:user.uid,email:user.email});return}
+        B.ro=!sm;name=(sm||sl).val();
         B.name=typeof name==='string'&&name.trim()?name.trim():(typeof name==='object'&&name&&name.nom)?String(name.nom):B.email.split('@')[0];
         h.onUser({name:B.name,email:B.email});
         const err=e=>{console.error(e);h.onError(e)};
@@ -549,7 +556,7 @@ function FirebaseBackend(){
         const ready=k=>{got[k]=true;if(got.items&&got.orig)h.onReady()};
         unsubs.push(fd.onValue(fd.ref(db,'planning/orig'),s=>{h.onOrig(s.val()||{});if(!got.orig)ready('orig')},err));
         unsubs.push(fd.onValue(fd.ref(db,'planning/items'),s=>{h.onItems(s.val()||{});if(!got.items)ready('items')},err));
-        unsubs.push(fd.onValue(fd.query(fd.ref(db,'planning/journal'),fd.limitToLast(150)),s=>{const v=s.val()||{};h.onJournal(Object.keys(v).sort().map(k=>({k,...v[k]})))},err));
+        if(!B.ro)unsubs.push(fd.onValue(fd.query(fd.ref(db,'planning/journal'),fd.limitToLast(150)),s=>{const v=s.val()||{};h.onJournal(Object.keys(v).sort().map(k=>({k,...v[k]})))},err));
         unsubs.push(fd.onValue(fd.ref(db,'planning/presence'),s=>{const v=s.val()||{};h.onPresence(Object.entries(v).map(([u,x])=>({u,n:(x&&x.n)||'?'})))},err));
         const pr=fd.ref(db,'planning/presence/'+user.uid);
         unsubs.push(fd.onValue(fd.ref(db,'.info/connected'),s=>{const on=!!s.val();h.onConn(on);if(on)fd.onDisconnect(pr).remove().then(()=>fd.set(pr,{n:B.name,at:fd.serverTimestamp()})).catch(()=>{})}));
@@ -578,6 +585,7 @@ function send(patch,msg,id){
   .catch(e=>{pendingWrites--;console.error(e);const denied=/permission/i.test(e&&(e.code||e.message)||'');setSaved(denied?'Échec : votre compte n’a pas les droits d’écriture':'Échec de l’enregistrement','err');toast(denied?'Modification refusée : droits insuffisants.':'La modification n’a pas pu être enregistrée.')})}
 function stamp(r){r.u=BE.uid;r.by=BE.name;r.at=Date.now();return r}
 function mutate(label,fn,id){
+  if(BE.ro){toast('Accès en lecture seule : vous ne pouvez pas modifier le planning.');update();refreshPanel();return}
   const before=new Map(ITEMS.map(r=>[r.id,JSON.stringify(r)]));
   fn();
   if(typeof label==='function')label=label();
@@ -891,7 +899,7 @@ function openHistory(keep){
    ===================================================================== */
 let drag=null,suppressClick=false,pendingRemote=null;
 $('rows').addEventListener('pointerdown',e=>{
-  const el=e.target.closest('.bar[data-id],.dia[data-id]');if(!el||e.button!==0)return;
+  const el=e.target.closest('.bar[data-id],.dia[data-id]');if(!el||e.button!==0||BE.ro)return;
   const r=byId(el.dataset.id);if(!r)return;
   const rect=el.getBoundingClientRect(),ox=e.clientX-rect.left;
   let mode='move';
@@ -954,19 +962,26 @@ function exportCSV(){
 /* Compte rendu : brouillon Outlook (.eml) avec les échéances de la semaine (filtres actifs respectés) */
 function exportMail(){
   const d=x=>dt(x).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
-  const rows=ITEMS.filter(r=>baseMatch(r)&&thisWeek(r)).sort((a,b)=>rank(a)-rank(b)||a.e-b.e||a.id.localeCompare(b.id,'fr',{numeric:true}));
-  const th='style="border:1px solid #bfbfbf;padding:6px 10px;background:#1f3864;color:#fff;text-align:left"',td='style="border:1px solid #bfbfbf;padding:6px 10px;vertical-align:top"';
+  const byPrio=(a,b)=>rank(a)-rank(b)||a.e-b.e||a.id.localeCompare(b.id,'fr',{numeric:true});
+  const rows=ITEMS.filter(r=>baseMatch(r)&&thisWeek(r)).sort(byPrio);
+  const late=ITEMS.filter(r=>baseMatch(r)&&status(r)==='retard').sort((a,b)=>a.e-b.e||byPrio(a,b));
+  const th='style="border:1px solid #bfbfbf;padding:6px 10px;background:#1f3864;color:#fff;text-align:left"',thL='style="border:1px solid #bfbfbf;padding:6px 10px;background:#c00000;color:#fff;text-align:left"',td='style="border:1px solid #bfbfbf;padding:6px 10px;vertical-align:top"';
   const table=rows.length?`<table style="border-collapse:collapse;font:10pt Calibri,Arial,sans-serif"><tr><th ${th}>Action</th><th ${th}>Responsable</th><th ${th}>Échéance</th></tr>`
     +rows.map(r=>`<tr><td ${td}><b>${esc(r.id)}</b> – ${esc(r.a)}</td><td ${td}>${esc(r.p)}</td><td ${td}>${esc(d(r.e))}</td></tr>`).join('')+'</table>'
     :'<p><i>Aucune action ouverte avec une échéance cette semaine.</i></p>';
+  const lateTable=late.length?`<table style="border-collapse:collapse;font:10pt Calibri,Arial,sans-serif"><tr><th ${thL}>Action</th><th ${thL}>Responsable</th><th ${thL}>Échéance</th><th ${thL}>Retard</th></tr>`
+    +late.map(r=>{const j=S.T-r.e;return `<tr><td ${td}><b>${esc(r.id)}</b> – ${esc(r.a)}</td><td ${td}>${esc(r.p)}</td><td ${td}>${esc(d(r.e))}</td><td ${td}>${j} jour${j>1?'s':''}</td></tr>`}).join('')+'</table>'
+    :'<p><i>Aucune échéance dépassée.</i></p>';
   const html=`<html><head><meta charset="utf-8"></head><body style="font:11pt Calibri,Arial,sans-serif">`
-    +`<p>Bonjour à tous,</p><p>Comme convenu, voici le récapitulatif des actions ouvertes de la semaine (échéances du ${esc(d(S.T))} au ${esc(d(friday()))}). Merci de bien vouloir maintenir leur intégration en début de support, avec responsable et échéance.</p>`
-    +table+'<p>Bien cordialement,</p></body></html>';
+    +`<p>Bonjour à tous,</p><p>Comme convenu, voici le récapitulatif des actions ouvertes de la semaine (échéances du ${esc(d(S.T))} au ${esc(d(friday()))}), ainsi que les actions dont l’échéance est dépassée. Merci de bien vouloir maintenir leur intégration en début de support, avec responsable et échéance.</p>`
+    +`<p><b>Actions de la semaine</b></p>`+table
+    +`<p><b style="color:#c00000">Échéances dépassées, non soldées (${late.length})</b></p>`+lateTable
+    +'<p>Bien cordialement,</p></body></html>';
   const b64=s=>{const u=new TextEncoder().encode(s);let t='';u.forEach(c=>t+=String.fromCharCode(c));return btoa(t)};
-  const subject=`Compte rendu – actions de la semaine (jusqu’au ${fmt(friday())})`;
+  const subject=`Compte rendu – actions de la semaine (jusqu’au ${fmt(friday())}) et échéances dépassées`;
   const eml=['X-Unsent: 1','Subject: '+subject.match(/.{1,15}/gu).map(p=>'=?UTF-8?B?'+b64(p)+'?=').join('\r\n '),'MIME-Version: 1.0','Content-Type: text/html; charset=UTF-8','Content-Transfer-Encoding: base64','',b64(html).replace(/.{76}/g,'$&\r\n')].join('\r\n');
   download(eml,'message/rfc822','Compte_rendu_vague_1_'+toISO(S.T)+'.eml');
-  toast(`Brouillon téléchargé (${rows.length} action${rows.length>1?'s':''}) : ouvrez-le pour l’afficher dans Outlook`);
+  toast(`Brouillon téléchargé (${rows.length} action${rows.length>1?'s':''} de la semaine, ${late.length} en retard) : ouvrez-le pour l’afficher dans Outlook`);
 }
 async function readPlanningFile(file){
   try{const o=JSON.parse(await file.text());const raw=Array.isArray(o)?o:o.items;if(!Array.isArray(raw))throw new Error('format');
@@ -1057,7 +1072,7 @@ function applyRemoteItems(obj){
 }
 const H={
   onGate:(k,i)=>gate(k,i),
-  onUser:u=>{$('who').innerHTML=`<span class="me">${esc(u.name)}</span><button class="lnk" id="logout">Se déconnecter</button>`;$('logout').onclick=()=>BE.logout()},
+  onUser:u=>{document.body.classList.toggle('ro',!!BE.ro);$('who').innerHTML=`<span class="me">${esc(u.name)}</span>${BE.ro?'<span class="rotag">Lecture seule</span>':''}<button class="lnk" id="logout">Se déconnecter</button>`;$('logout').onclick=()=>BE.logout()},
   onOrig:obj=>{ORIG=Object.fromEntries(fromObj(obj).map(r=>[r.id,r]));if(READY)update()},
   onItems:obj=>{if(drag){pendingRemote=obj;return}applyRemoteItems(obj)},
   onJournal:list=>{
